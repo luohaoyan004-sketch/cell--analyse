@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cell ROI Analyzer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Cell ROI Analyzer</h1>
+      <p>显微图 ROI 计数与铺展面积分析</p>
+      <nav class="pageTabs" aria-label="页面切换">
+        <button id="aiTabBtn" class="active">AI 分区</button>
+        <button id="manualTabBtn">手动采样</button>
+      </nav>
+    </div>
+    <div class="status" id="serverStatus">检测后端中…</div>
+  </header>
+  <div id="appToast" class="noticeToast hidden" role="status" aria-live="polite"></div>
+
+  <main id="aiPage" class="layout page activePage">
+    <section class="panel controls">
+      <h2>图像</h2>
+      <div class="field">
+        <span>上传图片</span>
+        <div id="dropZone" class="dropZone" role="button" tabindex="0" aria-label="拖拽或点击上传图片">
+          <input type="file" id="imageInput" accept="image/*,.tif,.tiff" />
+          <strong>拖拽图片到这里</strong>
+          <small id="imageNameHint">或点击选择图片；支持 JPG / PNG / TIF / TIFF</small>
+        </div>
+      </div>
+
+      <label class="field">
+        <span>图片类型</span>
+        <select id="imageType">
+          <option value="brightfield" selected>明场图 brightfield</option>
+          <option value="phase_contrast">相差图 phase contrast</option>
+          <option value="fluorescence">荧光图 fluorescence</option>
+        </select>
+      </label>
+
+      <div class="grid2">
+        <label class="field">
+          <span>Scale bar 实际长度 μm</span>
+          <input id="scaleUm" type="number" min="0" step="0.01" value="100" />
+        </label>
+        <label class="field">
+          <span>Scale bar 像素长度 px</span>
+          <input id="scalePx" type="number" min="0" step="0.01" value="250" />
+        </label>
+      </div>
+      <p class="hint" id="scaleHint">1 pixel = 0.4000 μm</p>
+
+      <h2>ROI</h2>
+      <div class="segmented">
+        <button id="drawModeBtn" class="active">绘制 / 重画 ROI</button>
+        <button id="selectModeBtn">选择区域 / 修改</button>
+      </div>
+      <div class="segmented">
+        <button id="roiRectBtn" class="active">矩形 ROI</button>
+        <button id="roiCircleBtn">圆形 ROI</button>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <span>行数</span>
+          <input id="gridRows" type="number" min="1" max="20" value="3" />
+        </label>
+        <label class="field">
+          <span>列数</span>
+          <input id="gridCols" type="number" min="1" max="20" value="3" />
+        </label>
+      </div>
+      <button id="makeGridBtn" class="primary">生成网格</button>
+
+      <h2>显示</h2>
+      <div class="grid3">
+        <button id="fitViewBtn">适应屏幕</button>
+        <button id="actualSizeBtn">100% 原尺寸</button>
+        <button id="zoomOutBtn">缩小</button>
+        <button id="zoomInBtn">放大</button>
+      </div>
+      <p class="hint" id="zoomHint">未加载图片</p>
+
+      <h2>分析</h2>
+      <button id="analyzeAllBtn" class="primary">并行分析全部区域</button>
+      <button id="analyzeOneBtn">只分析当前选中区域</button>
+      <button id="clearBtn">清空结果</button>
+      <progress id="progress" value="0" max="1"></progress>
+      <p class="hint" id="progressText">等待操作</p>
+
+      <h2>修正</h2>
+      <label class="field">
+        <span>区域</span>
+        <input id="selectedRegion" readonly placeholder="点击图中网格选择区域" />
+      </label>
+      <label class="field">
+        <span>模式</span>
+        <select id="modeSelect">
+          <option value="ai">AI 识别</option>
+          <option value="manual_corrected">手动修正</option>
+          <option value="manual_override">手动覆盖</option>
+        </select>
+      </label>
+      <div class="grid2">
+        <label class="field">
+          <span>细胞数量</span>
+          <input id="manualCount" type="number" min="0" step="1" />
+        </label>
+        <label class="field">
+          <span>平均单细胞面积 μm²</span>
+          <input id="manualMeanArea" type="number" min="0" step="0.01" />
+        </label>
+      </div>
+      <button id="applyManualBtn">应用到当前区域</button>
+
+      <h2>导出</h2>
+      <div class="grid2">
+        <button id="exportCsvBtn">导出 CSV</button>
+        <button id="exportJsonBtn">导出 JSON</button>
+        <button id="exportPngBtn">导出轮廓 PNG</button>
+        <button id="exportJpegBtn">导出轮廓 JPEG</button>
+        <button id="exportTiffBtn">导出轮廓 TIFF</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="canvasShell" id="canvasShell">
+        <canvas id="mainCanvas"></canvas>
+      </div>
+      <section class="panel summary">
+        <h2>最终结果</h2>
+        <div class="cards">
+          <div><span>总细胞数量</span><strong id="totalCount">0</strong></div>
+          <div><span>总细胞展开面积</span><strong id="totalArea">0 μm²</strong></div>
+          <div><span>平均单细胞面积</span><strong id="meanArea">0 μm²</strong></div>
+          <div><span>细胞覆盖率</span><strong id="coverage">0%</strong></div>
+        </div>
+      </section>
+      <section class="panel tablePanel">
+        <h2>分区结果</h2>
+        <p class="emptyState" id="aiTableEmpty">暂无分区结果。</p>
+        <div class="tableWrap">
+          <table id="resultTable">
+            <thead>
+              <tr>
+                <th>区域</th>
+                <th>模式</th>
+                <th>细胞数量</th>
+                <th>总面积 μm²</th>
+                <th>平均面积 μm²</th>
+                <th>覆盖率</th>
+                <th>提示</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <main id="manualPage" class="layout page hidden">
+    <section class="panel controls">
+      <h2>图像</h2>
+      <div class="field">
+        <span>上传图片</span>
+        <div id="manualDropZone" class="dropZone" role="button" tabindex="0" aria-label="拖拽或点击上传图片">
+          <input type="file" id="manualImageInput" accept="image/*,.tif,.tiff" />
+          <strong>拖拽图片到这里</strong>
+          <small id="manualImageNameHint">或点击选择图片；支持 JPG / PNG / TIF / TIFF</small>
+        </div>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <span>Scale bar 实际长度 μm</span>
+          <input id="manualScaleUm" type="number" min="0" step="0.01" value="100" />
+        </label>
+        <label class="field">
+          <span>Scale bar 像素长度 px</span>
+          <input id="manualScalePx" type="number" min="0" step="0.01" value="250" />
+        </label>
+      </div>
+      <p class="hint" id="manualScaleHint">1 pixel = 0.4000 μm</p>
+
+      <h2>颜色组</h2>
+      <label class="field">
+        <span>当前颜色组</span>
+        <select id="manualGroupSelect"></select>
+      </label>
+      <label class="field">
+        <span>颜色组名称</span>
+        <input id="manualGroupName" placeholder="例如：高密度区 / 气泡边缘区" />
+      </label>
+      <div class="grid2">
+        <button id="manualAddGroupBtn">新增颜色组</button>
+        <button id="manualApplyGroupNameBtn">保存名称</button>
+      </div>
+      <h2>绘图</h2>
+      <div class="toolGrid">
+        <button class="manualTool active" data-manual-mode="sample">画小样本区域</button>
+        <button class="manualTool" data-manual-mode="cell">画细胞轮廓</button>
+        <button class="manualTool" data-manual-mode="target">画整体推算区域</button>
+        <button class="manualTool" data-manual-mode="select">选择 / 修改</button>
+      </div>
+      <label class="field">
+        <span>形状</span>
+        <select id="manualShapeSelect">
+          <option value="free" selected>自由画笔</option>
+          <option value="rect">矩形</option>
+          <option value="circle">圆形</option>
+        </select>
+      </label>
+      <h2>显示与编辑</h2>
+      <div class="grid3">
+        <button id="manualFitBtn">适应屏幕</button>
+        <button id="manualActualBtn">100% 原尺寸</button>
+        <button id="manualZoomOutBtn">缩小</button>
+        <button id="manualZoomInBtn">放大</button>
+      </div>
+      <p class="hint" id="manualZoomHint">未加载图片</p>
+      <div class="checkList">
+        <label><input id="showManualSamples" type="checkbox" checked /> 样本区域</label>
+        <label><input id="showManualTargets" type="checkbox" checked /> 整体区域</label>
+        <label><input id="showManualCells" type="checkbox" checked /> 细胞轮廓</label>
+        <label><input id="showManualLabels" type="checkbox" /> 编号/文字（默认关闭）</label>
+      </div>
+      <div class="grid2">
+        <button id="manualUndoBtn">撤销上一笔</button>
+        <button id="manualDeleteBtn">删除选中</button>
+        <button id="manualClearGroupBtn">清空当前颜色</button>
+        <button id="manualClearAllBtn">清空全部标注</button>
+      </div>
+      <label class="field">
+        <span>当前选中对象</span>
+        <input id="manualSelectedInfo" readonly placeholder="选择/修改模式下点击对象" />
+      </label>
+
+      <h2>导出</h2>
+      <div class="grid2">
+        <button id="manualExportCsvBtn">导出 CSV</button>
+        <button id="manualExportJsonBtn">导出项目 JSON</button>
+        <button id="manualExportAnnotatedPngBtn">导出标注 PNG</button>
+        <button id="manualExportContourPngBtn">导出轮廓 PNG</button>
+        <button id="manualExportTiffBtn">导出轮廓 TIFF</button>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <div class="canvasShell" id="manualCanvasShell">
+        <canvas id="manualCanvas"></canvas>
+      </div>
+      <section class="panel summary">
+        <h2>手动采样外推 · 总结果</h2>
+        <div class="cards">
+          <div><span>最终总细胞数量</span><strong id="manualTotalCount">0</strong></div>
+          <div><span>最终总铺展面积</span><strong id="manualTotalSpread">0 μm²</strong></div>
+          <div><span>最终平均单细胞面积</span><strong id="manualMeanSpread">0 μm²</strong></div>
+          <div><span>整体覆盖率</span><strong id="manualCoverage">0%</strong></div>
+        </div>
+        <p class="hint strongHint" id="manualQcHint">建议每种颜色至少标注 2–3 个样本区域。</p>
+      </section>
+      <section class="panel tablePanel">
+        <h2>分颜色结果</h2>
+        <div class="tableWrap">
+          <table id="manualGroupTable">
+            <thead>
+              <tr>
+                <th>颜色</th>
+                <th>名称</th>
+                <th>样本数</th>
+                <th>样本细胞数</th>
+                <th>样本密度 cells/mm²</th>
+                <th>样本覆盖率</th>
+                <th>整体面积 μm²</th>
+                <th>预计细胞数</th>
+                <th>预计铺展面积 μm²</th>
+                <th>提示</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel tablePanel">
+        <h2>标注对象列表</h2>
+        <p class="emptyState" id="manualObjectEmpty">暂无标注对象。</p>
+        <div class="tableWrap smallTable">
+          <table id="manualObjectTable">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>颜色组</th>
+                <th>类型</th>
+                <th>面积 μm²</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

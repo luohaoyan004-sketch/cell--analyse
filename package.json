@@ -1,0 +1,13 @@
+{
+  "name": "cell-roi-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web tool for ROI-based microscopy cell counting and projected cell area analysis using OpenAI GPT-5.5.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
