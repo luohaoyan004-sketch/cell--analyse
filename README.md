@@ -2,12 +2,14 @@
 
 包含两个页面：
 
-1. **AI 自动分区识别**：上传图片、画 ROI、切网格，使用 ImageJ 风格的本地图像处理计算细胞，并支持手动修正和结果导出。
+1. **AI 自动分区识别**：上传图片、选择 4×/10×/20× 物镜、画 ROI、切网格，使用尺度感知的本地图像处理计算圆形细胞，并支持手动修正和结果导出。
 2. **手动采样外推分析**：不同颜色代表不同密度区域，支持自由画笔、开放线保留、端点补画连接、闭合后高亮、按颜色外推并汇总细胞数量与铺展面积。
 
 ## 当前版本更新
 
-- AI 分区默认使用确定性的 ImageJ 风格本地流水线：局部背景校正、平滑、Otsu 自动阈值、形态学开闭运算、颗粒分析与分水岭式接触细胞分离。
+- 明场/相差图默认使用多尺度 DoG/LoG 式圆形 blob 检测，再通过 Hessian 各向同性、径向“亮中心—暗环—背景恢复”校验和非极大值抑制，排除圆孔边缘、细长结构和纹理，并确保每个小圆细胞只计数一次。
+- AI 页面支持 4×、10×、20× 物镜预设，预计直径分别为约 12、30、60 px；每个预设会在相邻尺度搜索，兼容同一视野中的大小差异。
+- 荧光图继续使用局部背景校正、Otsu 自动阈值、形态学清理、颗粒分析与接触细胞分离。
 - 可调整背景半径、阈值偏移、最小/最大细胞面积，并可关闭接触细胞分离。
 - 每个网格使用带缓冲区的图像分析，再按完整细胞质心唯一归属分区，降低跨网格重复计数。
 - 分区图像只在浏览器本地处理，不需要 OpenAI API key，也不会发送给外部视觉模型。
@@ -65,12 +67,26 @@ PORT=8787
 
 如果三种方式都不可用，可以先用 ImageJ/Fiji/NIS-Elements 将显微镜原始 TIFF 导出为 PNG 再上传。
 
-## ImageJ 风格参数建议
+## 自动识别参数建议
 
-- **背景校正半径**：应略大于典型细胞的短轴；背景不均匀时可适当增大。
-- **阈值偏移**：正值更严格、减少背景误检；负值更宽松、保留较淡细胞。
-- **最小/最大细胞面积**：单位为 px²，建议先用一张代表性图像校准。
-- **分水岭分离**：适合接触细胞较多的图像；细长细胞被过度拆分时可关闭。
+- **物镜倍数**：必须与采集图像使用的物镜一致。示例 `1_RGB_DIA.tif` 的元数据为 Nikon Plan Fluor 4×。
+- **阈值偏移**：正值更严格、减少较淡圆点；负值更宽松、保留低对比度圆点。
+- **最小/最大细胞面积**：单位为 px²；4× 默认最小面积 40 px²，以保留直径约 8 px 的小圆细胞。
+- **背景校正半径 / 分水岭**：主要用于荧光颗粒分割；明场圆细胞模式由倍镜自动决定检测尺度。
+
+## 方法依据
+
+- LoG/尺度空间适合定位近圆形 blob；TrackMate 等生物图像工具也采用 LoG 检测器。
+- 明场细胞自动分析研究使用背景校正、候选目标检测和基于形态的粘连目标分离。
+- CellProfiler 将尺寸、形状筛选和接触目标分离作为可靠的细胞识别策略。
+- 通用深度模型（如 Cellpose）能力强，但针对特殊明场成像仍需要代表性人工标注来验证或微调；当前版本没有足够标注集，因此优先采用可解释、可在浏览器离线运行的确定性方案。
+
+参考论文：
+
+- [An automatic method for robust and fast cell detection in bright field images from high-throughput microscopy](https://pubmed.ncbi.nlm.nih.gov/24090363/)
+- [CellProfiler: image analysis software for identifying and quantifying cell phenotypes](https://pmc.ncbi.nlm.nih.gov/articles/PMC1794559/)
+- [Cellpose: a generalist algorithm for cellular segmentation](https://www.nature.com/articles/s41592-020-01018-x)
+- [Comparing Deep Learning Performance for CLL Cell Segmentation in Brightfield Microscopy Images](https://pubmed.ncbi.nlm.nih.gov/39246684/)
 
 
 ## v9 更新
