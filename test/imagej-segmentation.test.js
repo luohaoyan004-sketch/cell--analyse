@@ -20,6 +20,29 @@ function syntheticImage(width, height, background, circles) {
   return { width, height, data };
 }
 
+function syntheticHaloImage(width, height, diameter, centers) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  const radius = diameter / 2;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let value = 125 + x * 0.03 + y * 0.02;
+      for (const center of centers) {
+        const distance = Math.hypot(x - center.x, y - center.y);
+        if (distance <= radius * 0.38) value = 225;
+        else if (distance <= radius) value = 45;
+      }
+      // A bright elongated structure with dark sides should not be counted as a round cell.
+      if (x > width * 0.3 && x < width * 0.75 && Math.abs(y - height * 0.75) <= 1) value = 220;
+      const index = (y * width + x) * 4;
+      data[index] = value;
+      data[index + 1] = value;
+      data[index + 2] = value;
+      data[index + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
 test('detects dark cells over uneven brightfield background', () => {
   const image = syntheticImage(160, 100, x => 190 + x * 0.2, [
     { x: 42, y: 48, radius: 11, value: 55 },
@@ -62,4 +85,34 @@ test('honors ROI mask and particle size filter', () => {
   });
   assert.equal(result.cell_count, 1);
   assert.ok(result.cells[0].center_x < width / 2);
+});
+
+test('scale-aware mode detects round halo cells and rejects a ridge', () => {
+  const centers = [
+    { x: 35, y: 32 },
+    { x: 70, y: 44 },
+    { x: 83, y: 44 }
+  ];
+  const image = syntheticHaloImage(130, 90, 12, centers);
+  const result = segmentImageData(image, {
+    imageType: 'brightfield', detectionMode: 'circular_blob', magnification: 4,
+    expectedDiameter: 12, minArea: 50, maxArea: 220
+  });
+  assert.equal(result.method, 'scale_aware_circular_blob');
+  assert.equal(result.cell_count, 3);
+  assert.ok(result.cells.every(cell => cell.contour.length === 24));
+  for (const center of centers) {
+    assert.ok(result.cells.some(cell => Math.hypot(cell.center_x - center.x, cell.center_y - center.y) < 3));
+  }
+});
+
+test('magnification changes the expected circular-cell scale', () => {
+  const image = syntheticHaloImage(180, 130, 30, [{ x: 78, y: 55 }]);
+  const result = segmentImageData(image, {
+    imageType: 'brightfield', detectionMode: 'circular_blob', magnification: 10,
+    minArea: 300, maxArea: 1200
+  });
+  assert.equal(result.magnification, 10);
+  assert.equal(result.expectedDiameterPixels, 30);
+  assert.equal(result.cell_count, 1);
 });

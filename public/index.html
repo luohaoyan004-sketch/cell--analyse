@@ -33,6 +33,16 @@
       </div>
 
       <label class="field">
+        <span>AI 识别物镜倍数</span>
+        <select id="aiMagnification">
+          <option value="4" selected>4× 低倍镜</option>
+          <option value="10">10× 中倍镜</option>
+          <option value="20">20× 高倍镜</option>
+        </select>
+      </label>
+      <p class="hint" id="aiMagnificationHint">4×：预计圆细胞直径约 12 px；适用于当前 Plan Fluor 4× 示例图。</p>
+
+      <label class="field">
         <span>图片类型</span>
         <select id="imageType">
           <option value="brightfield" selected>明场图 brightfield</option>
@@ -42,8 +52,8 @@
       </label>
 
       <details class="analysisSettings" open>
-        <summary>ImageJ 风格识别参数</summary>
-        <p class="hint">本地执行背景校正、Otsu 自动阈值、形态学清理、颗粒分析和接触细胞分离；图片不会上传到外部模型。</p>
+        <summary>尺度感知识别参数</summary>
+        <p class="hint">明场/相差图默认执行多尺度 DoG/LoG 式圆点检测、径向环形校验和非极大值抑制；荧光图继续使用 Otsu 颗粒分割。图片不会上传到外部模型。</p>
         <div class="grid2">
           <label class="field">
             <span>背景校正半径 px</span>
@@ -55,14 +65,14 @@
           </label>
           <label class="field">
             <span>最小细胞面积 px²</span>
-            <input id="minCellArea" type="number" min="1" step="1" value="80" />
+            <input id="minCellArea" type="number" min="1" step="1" value="40" />
           </label>
           <label class="field">
             <span>最大细胞面积 px²</span>
             <input id="maxCellArea" type="number" min="1" step="1" value="50000" />
           </label>
         </div>
-        <label class="checkLine"><input id="watershedCells" type="checkbox" checked /> 分水岭方式分离接触细胞</label>
+        <label class="checkLine"><input id="watershedCells" type="checkbox" checked /> 荧光图：分水岭方式分离接触细胞</label>
       </details>
 
       <div class="grid2">
@@ -122,7 +132,7 @@
       <label class="field">
         <span>模式</span>
         <select id="modeSelect">
-          <option value="imagej">ImageJ 风格识别</option>
+          <option value="imagej">尺度感知自动识别</option>
           <option value="manual_corrected">手动修正</option>
           <option value="manual_override">手动覆盖</option>
         </select>
