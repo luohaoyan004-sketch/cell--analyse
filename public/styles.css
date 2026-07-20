@@ -182,6 +182,37 @@ h2:first-child { margin-top: 0; }
   font-size: 12px;
 }
 
+.analysisSettings {
+  margin: 10px 0 16px;
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.analysisSettings summary {
+  cursor: pointer;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.analysisSettings .hint { margin: 9px 0 11px; }
+
+.checkLine {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.checkLine input {
+  width: auto;
+  min-height: auto;
+  margin: 0;
+}
+
 input,
 select,
 button {

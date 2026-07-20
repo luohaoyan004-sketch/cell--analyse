@@ -8,6 +8,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
@@ -154,6 +155,7 @@ function readBinary(req, maxBytes) {
 
 function convertTiffToPngDataUrl(buffer) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('Empty TIFF upload');
+  if (!isTiffBuffer(buffer)) throw new Error('文件内容不是有效的 TIFF/TIF');
   const py = String.raw`
 import sys, io, json, base64
 from PIL import Image, ImageOps
@@ -205,15 +207,77 @@ except Exception as e:
   const runPython = (cmd) => spawnSync(cmd, ['-c', py], { input: buffer, maxBuffer: 180 * 1024 * 1024 });
   let proc = runPython('python3');
   if (proc.error && proc.error.code === 'ENOENT') proc = runPython('python');
-  if (proc.error) throw proc.error;
   const stdout = proc.stdout ? proc.stdout.toString('utf8').trim() : '';
   const stderr = proc.stderr ? proc.stderr.toString('utf8').trim() : '';
   let parsed;
   try { parsed = stdout ? JSON.parse(stdout) : null; } catch (_) {}
-  if (proc.status !== 0 || !parsed || parsed.error) {
-    throw new Error(`TIFF conversion failed${parsed?.error ? ': ' + parsed.error : stderr ? ': ' + stderr : ''}`);
+  if (proc.status === 0 && parsed && !parsed.error) return parsed;
+
+  const pythonError = parsed?.error || stderr || proc.error?.message || 'Pillow unavailable';
+  try {
+    return convertTiffWithSystemTool(buffer);
+  } catch (systemError) {
+    throw new Error(`TIFF 转换失败：Python/Pillow: ${pythonError}；系统转换器: ${systemError.message}`);
   }
-  return parsed;
+}
+
+function isTiffBuffer(buffer) {
+  if (buffer.length < 8) return false;
+  const littleEndian = buffer[0] === 0x49 && buffer[1] === 0x49;
+  const bigEndian = buffer[0] === 0x4d && buffer[1] === 0x4d;
+  if (!littleEndian && !bigEndian) return false;
+  const marker = littleEndian ? buffer.readUInt16LE(2) : buffer.readUInt16BE(2);
+  return marker === 42 || marker === 43;
+}
+
+function convertTiffWithSystemTool(buffer) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cell-roi-tiff-'));
+  const inputPath = path.join(tempDir, 'input.tif');
+  const outputPath = path.join(tempDir, 'output.png');
+  fs.writeFileSync(inputPath, buffer);
+  const attempts = process.platform === 'darwin'
+    ? [
+        { command: 'sips', args: ['-s', 'format', 'png', inputPath, '--out', outputPath] },
+        { command: 'magick', args: [`${inputPath}[0]`, outputPath] },
+        { command: 'convert', args: [`${inputPath}[0]`, outputPath] }
+      ]
+    : [
+        { command: 'magick', args: [`${inputPath}[0]`, outputPath] },
+        { command: 'convert', args: [`${inputPath}[0]`, outputPath] }
+      ];
+  const errors = [];
+  try {
+    for (const attempt of attempts) {
+      const proc = spawnSync(attempt.command, attempt.args, { maxBuffer: 20 * 1024 * 1024 });
+      if (proc.error?.code === 'ENOENT') {
+        errors.push(`${attempt.command} 未安装`);
+        continue;
+      }
+      if (proc.status !== 0 || !fs.existsSync(outputPath)) {
+        const detail = proc.stderr ? proc.stderr.toString('utf8').trim() : '';
+        errors.push(`${attempt.command}: ${detail || `退出码 ${proc.status}`}`);
+        continue;
+      }
+      const png = fs.readFileSync(outputPath);
+      const dimensions = pngDimensions(png);
+      return {
+        dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+        width: dimensions.width,
+        height: dimensions.height,
+        format: 'png',
+        source: `tiff-converted-${attempt.command}`
+      };
+    }
+    throw new Error(errors.join('；') || '没有可用的 TIFF 转换器');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function pngDimensions(buffer) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (buffer.length < 24 || !buffer.subarray(0, 8).equals(signature)) throw new Error('转换器没有生成有效 PNG');
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }
 
 
