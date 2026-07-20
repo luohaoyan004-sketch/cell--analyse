@@ -40,7 +40,17 @@
           <option value="20">20× 高倍镜</option>
         </select>
       </label>
-      <p class="hint" id="aiMagnificationHint">4×：预计圆细胞直径约 12 px；适用于当前 Plan Fluor 4× 示例图。</p>
+      <p class="hint" id="aiMagnificationHint">4×：圆细胞约 12 px；铺展细胞短轴约 22 px。</p>
+
+      <label class="field">
+        <span>AI 识别对象</span>
+        <select id="aiCellMorphology">
+          <option value="auto" selected>自动（按倍镜推荐）</option>
+          <option value="circular">小圆细胞 / 圆点</option>
+          <option value="spread">铺展贴壁细胞</option>
+        </select>
+      </label>
+      <p class="hint" id="aiCellMorphologyHint">自动模式：4× 优先识别小圆点；10×/20× 优先识别铺展贴壁细胞，可手动覆盖。</p>
 
       <label class="field">
         <span>图片类型</span>
@@ -53,7 +63,7 @@
 
       <details class="analysisSettings" open>
         <summary>尺度感知识别参数</summary>
-        <p class="hint">明场/相差图默认执行多尺度 DoG/LoG 式圆点检测、径向环形校验和非极大值抑制；荧光图继续使用 Otsu 颗粒分割。图片不会上传到外部模型。</p>
+        <p class="hint">圆细胞使用多尺度圆点检测；铺展细胞使用暗胞体中心种子、边缘支持和受邻近中心约束的轮廓扩展；荧光图继续使用 Otsu 颗粒分割。图片不会上传到外部模型。</p>
         <div class="grid2">
           <label class="field">
             <span>背景校正半径 px</span>

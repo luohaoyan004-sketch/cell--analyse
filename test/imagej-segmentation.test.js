@@ -43,6 +43,32 @@ function syntheticHaloImage(width, height, diameter, centers) {
   return { width, height, data };
 }
 
+function syntheticSpreadImage(width, height, cells) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let value = 165 + x * 0.04 + y * 0.02;
+      for (const cell of cells) {
+        const cos = Math.cos(cell.angle || 0);
+        const sin = Math.sin(cell.angle || 0);
+        const dx = x - cell.x;
+        const dy = y - cell.y;
+        const rx = dx * cos + dy * sin;
+        const ry = -dx * sin + dy * cos;
+        const normalized = (rx / cell.radiusX) ** 2 + (ry / cell.radiusY) ** 2;
+        if (normalized <= 1) value = 72;
+        else if (normalized <= 1.22) value = 225;
+      }
+      const index = (y * width + x) * 4;
+      data[index] = value;
+      data[index + 1] = value;
+      data[index + 2] = value;
+      data[index + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
 test('detects dark cells over uneven brightfield background', () => {
   const image = syntheticImage(160, 100, x => 190 + x * 0.2, [
     { x: 42, y: 48, radius: 11, value: 55 },
@@ -115,4 +141,23 @@ test('magnification changes the expected circular-cell scale', () => {
   assert.equal(result.magnification, 10);
   assert.equal(result.expectedDiameterPixels, 30);
   assert.equal(result.cell_count, 1);
+});
+
+test('spread-cell mode finds elongated dark bodies and estimates contours', () => {
+  const centers = [
+    { x: 72, y: 68, radiusX: 25, radiusY: 14, angle: 0.35 },
+    { x: 132, y: 78, radiusX: 28, radiusY: 15, angle: -0.25 },
+    { x: 188, y: 90, radiusX: 24, radiusY: 13, angle: 0.6 }
+  ];
+  const image = syntheticSpreadImage(270, 170, centers);
+  const result = segmentImageData(image, {
+    imageType: 'brightfield', detectionMode: 'spread_cell', magnification: 10,
+    expectedSpreadDiameter: 30, minArea: 120, maxArea: 4000
+  });
+  assert.equal(result.method, 'scale_aware_spread_cell');
+  assert.equal(result.cell_count, 3);
+  assert.ok(result.cells.every(cell => cell.contour.length === 24 && cell.area_pixels > 250));
+  for (const center of centers) {
+    assert.ok(result.cells.some(cell => Math.hypot(cell.center_x - center.x, cell.center_y - center.y) < 10));
+  }
 });

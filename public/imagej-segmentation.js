@@ -34,6 +34,9 @@
     if (options.detectionMode === 'circular_blob') {
       return detectCircularCells(gray, validMask, width, height, options, validCount);
     }
+    if (options.detectionMode === 'spread_cell') {
+      return detectSpreadCells(gray, validMask, width, height, options, validCount);
+    }
     const smoothed = options.smoothRadius > 0
       ? boxBlur(gray, width, height, options.smoothRadius)
       : gray;
@@ -115,9 +118,12 @@
       minArea,
       maxArea,
       polarity,
-      detectionMode: raw.detectionMode === 'circular_blob' ? 'circular_blob' : 'particle',
+      detectionMode: raw.detectionMode === 'circular_blob' || raw.detectionMode === 'spread_cell'
+        ? raw.detectionMode
+        : 'particle',
       magnification,
       expectedDiameter: clamp(finite(raw.expectedDiameter, presetDiameter), 6, 160),
+      expectedSpreadDiameter: clamp(finite(raw.expectedSpreadDiameter, { 4: 22, 10: 55, 20: 110 }[magnification]), 12, 220),
       backgroundRadius: clamp(Math.round(finite(raw.backgroundRadius, 24)), 2, 128),
       smoothRadius: clamp(Math.round(finite(raw.smoothRadius, 1)), 0, 4),
       thresholdOffset: clamp(finite(raw.thresholdOffset, 0), -100, 100),
@@ -324,6 +330,260 @@
       blobness: candidate.blobness,
       radial_coverage: candidate.radialCoverage
     };
+  }
+
+  /**
+   * Detect spread adherent cells by locating broad dark cell-body basins, then
+   * validating that each seed is surrounded by microscopy edges. Approximate
+   * contours expand toward strong edges and stop at neighbouring seed Voronoi
+   * boundaries, which prevents dense colonies from collapsing into one region.
+   */
+  function detectSpreadCells(gray, validMask, width, height, options, validCount) {
+    const diameter = options.expectedSpreadDiameter;
+    const innerRadius = Math.max(2, Math.round(diameter * 0.12));
+    const outerRadius = Math.max(innerRadius + 3, Math.round(diameter * 0.5));
+    const inner = boxBlur(gray, width, height, innerRadius);
+    const outer = boxBlur(gray, width, height, outerRadius);
+    const basinImage = boxBlur(gray, width, height, Math.max(1, Math.round(diameter * 0.04)));
+    const response = new Float32Array(gray.length);
+    for (let index = 0; index < response.length; index++) {
+      if (validMask[index]) response[index] = outer[index] - inner[index];
+    }
+
+    const responseStats = robustLocationScale(response, validMask);
+    const threshold = responseStats.median + responseStats.sigma * 3 + options.thresholdOffset * 0.2;
+    const margin = Math.max(4, Math.ceil(diameter * 1.75));
+    const rawSeeds = [];
+    for (let y = margin; y < height - margin; y++) {
+      for (let x = margin; x < width - margin; x++) {
+        const index = y * width + x;
+        if (!validMask[index] || response[index] <= threshold || !isLocalMaximum(response, validMask, width, index)) continue;
+        rawSeeds.push({ x: x + 0.5, y: y + 0.5, response: response[index] });
+      }
+    }
+    rawSeeds.sort((a, b) => b.response - a.response);
+    const separatedSeeds = suppressNearbySeeds(
+      rawSeeds,
+      diameter * 0.55,
+      basinImage,
+      width,
+      diameter * 1.7
+    );
+
+    const gradient = sobelMagnitude(gray, width, height);
+    const gradientStats = robustLocationScale(gradient, validMask);
+    const edgeThreshold = gradientStats.median + gradientStats.sigma * 3;
+    const texture = localStandardDeviation(gray, width, height, Math.max(3, Math.round(diameter * 0.27)));
+    const textureThreshold = Math.max(6, robustLocationScale(texture, validMask).median * 1.15);
+    const acceptedSeeds = [];
+    for (const seed of separatedSeeds) {
+      const index = Math.floor(seed.y) * width + Math.floor(seed.x);
+      const edgeCoverage = radialEdgeCoverage(
+        gradient, validMask, width, height, seed.x, seed.y, diameter, edgeThreshold
+      );
+      const localTexture = texture[index];
+      const edgeSupported = edgeCoverage >= 0.42;
+      const texturedPartialEdge = edgeCoverage >= 0.3 && localTexture >= textureThreshold;
+      if (!edgeSupported && !texturedPartialEdge) continue;
+      acceptedSeeds.push({
+        ...seed,
+        edgeCoverage,
+        texture: localTexture,
+        confidence: seed.response / Math.max(0.5, threshold)
+          + edgeCoverage * 1.5
+          + Math.min(1, localTexture / Math.max(1, textureThreshold))
+      });
+    }
+
+    acceptedSeeds.sort((a, b) => a.y - b.y || a.x - b.x);
+    const cells = [];
+    for (const seed of acceptedSeeds) {
+      const cell = spreadSeedToCell(seed, acceptedSeeds, gradient, validMask, width, height, diameter, edgeThreshold, cells.length + 1);
+      if (cell.area_pixels >= options.minArea && cell.area_pixels <= options.maxArea) cells.push(cell);
+    }
+    cells.forEach((cell, index) => { cell.cell_id = index + 1; });
+    const totalAreaPixels = cells.reduce((sum, cell) => sum + cell.area_pixels, 0);
+    const coverage = validCount > 0 ? totalAreaPixels / validCount * 100 : 0;
+    const warnings = [
+      `铺展贴壁细胞识别：${options.magnification}×，预计短轴 ${round(diameter, 1)}px`,
+      `暗胞体种子 + 径向边缘支持 + 邻近中心约束轮廓；种子 ${separatedSeeds.length} 个，保留 ${cells.length} 个`
+    ];
+    if (!cells.length) warnings.push('没有找到可靠的铺展细胞中心；请核对倍镜、ROI 或降低阈值偏移');
+    if (coverage > 90) warnings.push('估算轮廓覆盖率过高；建议提高阈值偏移或缩小 ROI 到培养区域');
+
+    return {
+      method: 'scale_aware_spread_cell',
+      threshold,
+      autoThreshold: threshold - options.thresholdOffset * 0.2,
+      polarity: 'dark-cell-body-with-edge',
+      magnification: options.magnification,
+      expectedDiameterPixels: diameter,
+      validAreaPixels: validCount,
+      expectedAreaPixels: Math.PI * (diameter / 2) ** 2,
+      cells,
+      cell_count: cells.length,
+      total_cell_area_pixels: totalAreaPixels,
+      mean_cell_area_pixels: cells.length ? totalAreaPixels / cells.length : 0,
+      coverage_percent: coverage,
+      warnings
+    };
+  }
+
+  function suppressNearbySeeds(sortedSeeds, minimumDistance, basinImage, width, sameBasinDistance = minimumDistance) {
+    const clusters = [];
+    const distanceSquared = minimumDistance * minimumDistance;
+    const sameBasinDistanceSquared = sameBasinDistance * sameBasinDistance;
+    for (const seed of sortedSeeds) {
+      const cluster = clusters.find(candidate => candidate.members.some(other => {
+        const dx = seed.x - other.x;
+        const dy = seed.y - other.y;
+        const squaredDistance = dx * dx + dy * dy;
+        if (squaredDistance < distanceSquared) return true;
+        if (!basinImage || squaredDistance >= sameBasinDistanceSquared) return false;
+
+        // An elongated cell can create several maxima along the same dark body.
+        // Merge them only when the smoothed intensity stays in the same dark
+        // body. Light smoothing bridges small nuclear highlights, while any
+        // bright sample along the line keeps touching cells apart.
+        const seedIndex = Math.floor(seed.y) * width + Math.floor(seed.x);
+        const otherIndex = Math.floor(other.y) * width + Math.floor(other.x);
+        const basinCeiling = Math.max(basinImage[seedIndex], basinImage[otherIndex]) + 18;
+        let darkSamples = 0;
+        for (const fraction of [0.25, 0.5, 0.75]) {
+          const sampleX = Math.round(seed.x + (other.x - seed.x) * fraction);
+          const sampleY = Math.round(seed.y + (other.y - seed.y) * fraction);
+          if (basinImage[sampleY * width + sampleX] <= basinCeiling) darkSamples += 1;
+        }
+        return darkSamples === 3;
+      }));
+      if (cluster) cluster.members.push(seed);
+      else clusters.push({ members: [seed] });
+    }
+    return clusters.map(cluster => {
+      const weightSum = cluster.members.reduce((sum, member) => sum + Math.max(0.01, member.response), 0);
+      return {
+        x: cluster.members.reduce((sum, member) => sum + member.x * Math.max(0.01, member.response), 0) / weightSum,
+        y: cluster.members.reduce((sum, member) => sum + member.y * Math.max(0.01, member.response), 0) / weightSum,
+        response: Math.max(...cluster.members.map(member => member.response))
+      };
+    });
+  }
+
+  function sobelMagnitude(gray, width, height) {
+    const smoothed = boxBlur(gray, width, height, 2);
+    const gradient = new Float32Array(gray.length);
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const top = (y - 1) * width + x;
+        const middle = y * width + x;
+        const bottom = (y + 1) * width + x;
+        const gx = -smoothed[top - 1] + smoothed[top + 1]
+          - 2 * smoothed[middle - 1] + 2 * smoothed[middle + 1]
+          - smoothed[bottom - 1] + smoothed[bottom + 1];
+        const gy = -smoothed[top - 1] - 2 * smoothed[top] - smoothed[top + 1]
+          + smoothed[bottom - 1] + 2 * smoothed[bottom] + smoothed[bottom + 1];
+        gradient[middle] = Math.hypot(gx, gy) / 8;
+      }
+    }
+    return gradient;
+  }
+
+  function localStandardDeviation(gray, width, height, radius) {
+    const squared = new Float32Array(gray.length);
+    for (let index = 0; index < gray.length; index++) squared[index] = gray[index] * gray[index];
+    const mean = boxBlur(gray, width, height, radius);
+    const meanSquared = boxBlur(squared, width, height, radius);
+    const deviation = new Float32Array(gray.length);
+    for (let index = 0; index < gray.length; index++) {
+      deviation[index] = Math.sqrt(Math.max(0, meanSquared[index] - mean[index] * mean[index]));
+    }
+    return deviation;
+  }
+
+  function radialEdgeCoverage(gradient, validMask, width, height, x, y, diameter, threshold) {
+    const angles = 24;
+    let validDirections = 0;
+    let supportedDirections = 0;
+    for (let angleIndex = 0; angleIndex < angles; angleIndex++) {
+      const angle = angleIndex / angles * Math.PI * 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      let maximum = 0;
+      let validSamples = 0;
+      for (let step = 0; step < 12; step++) {
+        const radius = diameter * (0.25 + step / 11 * 0.85);
+        const value = sampleNearest(gradient, validMask, width, height, x + cos * radius, y + sin * radius);
+        if (value === null) continue;
+        validSamples++;
+        maximum = Math.max(maximum, value);
+      }
+      if (!validSamples) continue;
+      validDirections++;
+      if (maximum >= threshold) supportedDirections++;
+    }
+    return validDirections ? supportedDirections / validDirections : 0;
+  }
+
+  function spreadSeedToCell(seed, seeds, gradient, validMask, width, height, diameter, edgeThreshold, cellId) {
+    const angles = 24;
+    let radii = [];
+    for (let angleIndex = 0; angleIndex < angles; angleIndex++) {
+      const angle = angleIndex / angles * Math.PI * 2;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const minimumRadius = diameter * 0.28;
+      let maximumRadius = diameter * 1.7;
+      for (const other of seeds) {
+        if (other === seed) continue;
+        const dx = other.x - seed.x;
+        const dy = other.y - seed.y;
+        const projection = dx * cos + dy * sin;
+        if (projection <= 0) continue;
+        const boundary = (dx * dx + dy * dy) / (2 * projection);
+        maximumRadius = Math.min(maximumRadius, boundary * 0.92);
+      }
+      maximumRadius = Math.max(minimumRadius, maximumRadius);
+      let bestRadius = Math.min(maximumRadius, diameter * 0.58);
+      let bestScore = -Infinity;
+      const steps = 20;
+      for (let step = 0; step < steps; step++) {
+        const radius = minimumRadius + step / (steps - 1) * (maximumRadius - minimumRadius);
+        const value = sampleNearest(gradient, validMask, width, height, seed.x + cos * radius, seed.y + sin * radius);
+        if (value === null) continue;
+        const score = value * (0.8 + radius / Math.max(1, maximumRadius) * 0.2);
+        if (score > bestScore) { bestScore = score; bestRadius = radius; }
+      }
+      if (bestScore < edgeThreshold * 0.7) bestRadius = Math.min(maximumRadius, diameter * 0.58);
+      radii.push(bestRadius);
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      radii = radii.map((radius, index) => (
+        radii[(index + radii.length - 1) % radii.length] + radius * 2 + radii[(index + 1) % radii.length]
+      ) / 4);
+    }
+    const contour = radii.map((radius, index) => {
+      const angle = index / radii.length * Math.PI * 2;
+      return [seed.x + Math.cos(angle) * radius, seed.y + Math.sin(angle) * radius];
+    });
+    const area = polygonArea(contour);
+    return {
+      cell_id: cellId,
+      center_x: seed.x,
+      center_y: seed.y,
+      area_pixels: area,
+      contour,
+      confidence: clamp(seed.confidence / 4, 0, 1),
+      edge_coverage: seed.edgeCoverage
+    };
+  }
+
+  function polygonArea(points) {
+    let area = 0;
+    for (let index = 0; index < points.length; index++) {
+      const next = points[(index + 1) % points.length];
+      area += points[index][0] * next[1] - next[0] * points[index][1];
+    }
+    return Math.abs(area) / 2;
   }
 
   function normalizeMask(rawMask, rgba, size) {
