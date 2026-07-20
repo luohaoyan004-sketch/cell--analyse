@@ -12,7 +12,7 @@
 - 每个网格使用带缓冲区的图像分析，再按完整细胞质心唯一归属分区，降低跨网格重复计数。
 - 分区图像只在浏览器本地处理，不需要 OpenAI API key，也不会发送给外部视觉模型。
 - AI 分区和手动采样均支持 `.tif` / `.tiff` 文件。
-- TIFF 转换依次尝试 Python/Pillow、macOS `sips`、ImageMagick；在 macOS 上无需额外安装 Pillow。
+- TIFF/TIF 默认在浏览器中使用随站点部署的 UTIF.js 解码，不依赖服务器系统程序，也不会上传原始 TIFF。
 
 ## 原有手动采样能力
 
@@ -55,7 +55,9 @@ PORT=8787
 
 ## TIFF 说明
 
-`.tif/.tiff` 上传会调用本地后端 `/api/convert-tiff` 转成 PNG。转换器按以下顺序尝试：
+`.tif/.tiff` 默认由浏览器本地解码并转换为画布图像，支持常见黑白、灰度、RGB、LZW、PackBits、Deflate、JPEG 等 TIFF 类型。原始 TIFF 不会发送到服务器。
+
+如果浏览器解码失败，程序才会调用兼容接口 `/api/convert-tiff`，并按以下顺序尝试：
 
 1. Python + Pillow；
 2. macOS 自带 `sips`；

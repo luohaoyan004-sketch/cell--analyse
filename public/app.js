@@ -159,11 +159,11 @@ async function checkServer() {
   try {
     const res = await fetch('/api/health');
     await res.json();
-    els.serverStatus.textContent = '本地 ImageJ 风格分割 · TIFF 服务正常';
+    els.serverStatus.textContent = '本地 ImageJ 风格分割 · TIFF 浏览器解析';
     els.serverStatus.className = 'status ok';
   } catch (_) {
-    els.serverStatus.textContent = '本地分割可用 · TIFF 服务未连接';
-    els.serverStatus.className = 'status warn';
+    els.serverStatus.textContent = '本地分割与 TIFF 浏览器解析可用';
+    els.serverStatus.className = 'status ok';
   }
 }
 
@@ -356,16 +356,28 @@ function isSupportedImageFile(file) {
 
 async function imageFileToLoadableUrl(file) {
   if (!isTiffFile(file)) return URL.createObjectURL(file);
-  const res = await fetch('/api/convert-tiff', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/octet-stream' },
-    body: await file.arrayBuffer()
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.dataUrl) {
-    throw new Error(data.error || 'TIFF 转换失败。可以先用 ImageJ/Fiji 导出为 PNG 后再上传。');
+  let browserError = null;
+  try {
+    if (!window.TiffLoader?.decodeTiffFileToObjectUrl) throw new Error('浏览器 TIFF 解码器未加载');
+    const decoded = await window.TiffLoader.decodeTiffFileToObjectUrl(file, window.UTIF);
+    return decoded.url;
+  } catch (error) {
+    browserError = error;
   }
-  return data.dataUrl;
+
+  // Compatibility fallback for local installations that still expose the legacy converter.
+  try {
+    const res = await fetch('/api/convert-tiff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: await file.arrayBuffer()
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.dataUrl) return data.dataUrl;
+    throw new Error(data.error || `HTTP ${res.status}`);
+  } catch (serverError) {
+    throw new Error(`TIFF 浏览器解析失败：${browserError?.message || browserError}；后备转换失败：${serverError.message || serverError}`);
+  }
 }
 
 function canvasPoint(evt) {
