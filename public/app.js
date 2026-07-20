@@ -26,6 +26,11 @@ const els = {
   imageInput: $('imageInput'),
   imageNameHint: $('imageNameHint'),
   imageType: $('imageType'),
+  backgroundRadius: $('backgroundRadius'),
+  thresholdOffset: $('thresholdOffset'),
+  minCellArea: $('minCellArea'),
+  maxCellArea: $('maxCellArea'),
+  watershedCells: $('watershedCells'),
   scaleUm: $('scaleUm'),
   scalePx: $('scalePx'),
   scaleHint: $('scaleHint'),
@@ -126,12 +131,15 @@ function updateAiActionStates() {
     if (!el) return;
     el.disabled = !hasSelectedRegion || state.isAnalyzing;
   });
+  [els.backgroundRadius, els.thresholdOffset, els.minCellArea, els.maxCellArea, els.watershedCells].forEach(el => {
+    if (el) el.disabled = state.isAnalyzing;
+  });
 
   if (!state.isAnalyzing) {
     if (!hasImage) els.progressText.textContent = '请先上传图片';
     else if (!hasRoi) els.progressText.textContent = '已上传图片，请在图上拖动画 ROI';
     else if (!hasRegions) els.progressText.textContent = 'ROI 已绘制，请生成网格';
-    else if (!hasResults) els.progressText.textContent = '网格已生成，可并行分析或手动修正';
+    else if (!hasResults) els.progressText.textContent = '网格已生成，可进行本地分割或手动修正';
   }
 }
 
@@ -150,13 +158,11 @@ function init() {
 async function checkServer() {
   try {
     const res = await fetch('/api/health');
-    const data = await res.json();
-    els.serverStatus.textContent = data.mock
-      ? `后端正常 · Mock 模式 · ${data.model}${data.mockReason ? ' · ' + data.mockReason : ''}`
-      : `后端正常 · API 模式 · ${data.model}`;
-    els.serverStatus.className = data.mock ? 'status warn' : 'status ok';
+    await res.json();
+    els.serverStatus.textContent = '本地 ImageJ 风格分割 · TIFF 服务正常';
+    els.serverStatus.className = 'status ok';
   } catch (_) {
-    els.serverStatus.textContent = '后端未连接';
+    els.serverStatus.textContent = '本地分割可用 · TIFF 服务未连接';
     els.serverStatus.className = 'status warn';
   }
 }
@@ -537,7 +543,7 @@ function syncManualPanel() {
   if (!r) return clearManualPanel();
   const res = state.results[r.id] || blankResult(r);
   els.selectedRegion.value = r.id;
-  els.modeSelect.value = res.mode || 'ai';
+  els.modeSelect.value = res.mode || 'imagej';
   els.manualCount.value = Number.isFinite(res.cell_count) ? res.cell_count : '';
   els.manualMeanArea.value = Number.isFinite(res.mean_cell_area_um2) ? round(res.mean_cell_area_um2, 2) : '';
   updateAiActionStates();
@@ -545,7 +551,7 @@ function syncManualPanel() {
 
 function clearManualPanel() {
   els.selectedRegion.value = '';
-  els.modeSelect.value = 'ai';
+  els.modeSelect.value = 'imagej';
   els.manualCount.value = '';
   els.manualMeanArea.value = '';
   updateAiActionStates();
@@ -554,7 +560,7 @@ function clearManualPanel() {
 function blankResult(region) {
   return {
     region_id: region.id,
-    mode: 'ai',
+    mode: 'imagej',
     cell_count: 0,
     total_cell_area_um2: 0,
     mean_cell_area_um2: 0,
@@ -579,13 +585,14 @@ async function analyzeAllRegions() {
   els.progress.max = regions.length;
   els.progress.value = 0;
   let completed = 0;
-  els.progressText.textContent = `并行分析中 0/${regions.length}`;
-  await Promise.all(regions.map(async (region) => {
+  els.progressText.textContent = `本地分割中 0/${regions.length}`;
+  for (const region of regions) {
     await analyzeRegion(region);
     completed += 1;
     els.progress.value = completed;
-    els.progressText.textContent = `并行分析中 ${completed}/${regions.length}`;
-  }));
+    els.progressText.textContent = `本地分割中 ${completed}/${regions.length}`;
+    await new Promise(resolve => requestAnimationFrame(resolve));
+  }
   state.isAnalyzing = false;
   els.progressText.textContent = '分析完成';
   updateAiActionStates();
@@ -617,24 +624,59 @@ async function analyzeSelectedRegion() {
 
 async function analyzeRegion(region) {
   try {
-    const crop = cropRegion(region);
-    const payload = {
-      regionId: region.id,
+    const backgroundRadius = Number(els.backgroundRadius.value);
+    const maxCellArea = Number(els.maxCellArea.value);
+    const padding = clamp(Math.max(backgroundRadius * 2, Math.sqrt(Math.max(1, maxCellArea) / Math.PI) * 0.5), 16, 160);
+    const crop = cropRegion(region, padding);
+    if (!window.ImageJSegmentation?.segmentImageData) throw new Error('本地分割模块未加载');
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const result = window.ImageJSegmentation.segmentImageData(crop.imageData, {
       imageType: els.imageType.value,
-      pixelSizeUm: getPixelSizeUm(),
-      width: crop.width,
-      height: crop.height,
-      effectiveAreaPixels: region.effectiveAreaPixels,
-      imageDataUrl: crop.dataUrl
-    };
-    const res = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      validMask: crop.validMask,
+      backgroundRadius,
+      thresholdOffset: Number(els.thresholdOffset.value),
+      minArea: Number(els.minCellArea.value),
+      maxArea: maxCellArea,
+      watershed: Boolean(els.watershedCells.checked)
     });
-    const data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error || '分析失败');
-    data.mode = 'ai';
+    const pixelSizeUm = getPixelSizeUm();
+    const areaFactor = pixelSizeUm > 0 ? pixelSizeUm * pixelSizeUm : 0;
+    const assignedCells = result.cells
+      .filter(cell => {
+        const globalX = crop.x + cell.center_x;
+        const globalY = crop.y + cell.center_y;
+        return globalX >= region.x && globalX < region.x + region.w
+          && globalY >= region.y && globalY < region.y + region.h
+          && pointInsideRoi(globalX, globalY);
+      })
+      .map((cell, index) => ({
+        ...cell,
+        cell_id: index + 1,
+        center_x: crop.x + cell.center_x - region.x,
+        center_y: crop.y + cell.center_y - region.y,
+        contour: cell.contour.map(([x, y]) => [crop.x + x - region.x, crop.y + y - region.y]),
+        area_um2: areaFactor ? cell.area_pixels * areaFactor : null
+      }));
+    const totalAreaPixels = assignedCells.reduce((sum, cell) => sum + cell.area_pixels, 0);
+    const meanAreaPixels = assignedCells.length ? totalAreaPixels / assignedCells.length : 0;
+    const data = {
+      ok: true,
+      mock: false,
+      model: 'imagej-local',
+      method: result.method,
+      region_id: region.id,
+      cell_count: assignedCells.length,
+      total_cell_area_pixels: totalAreaPixels,
+      mean_cell_area_pixels: meanAreaPixels,
+      total_cell_area_um2: areaFactor ? totalAreaPixels * areaFactor : null,
+      mean_cell_area_um2: areaFactor ? meanAreaPixels * areaFactor : null,
+      coverage_percent: region.effectiveAreaPixels > 0 ? totalAreaPixels / region.effectiveAreaPixels * 100 : 0,
+      threshold: result.threshold,
+      polarity: result.polarity,
+      cells: assignedCells,
+      warnings: result.warnings,
+      mode: 'imagej'
+    };
     state.results[region.id] = data;
     if (!state.selectedRegionId) state.selectedRegionId = region.id;
     syncManualPanel();
@@ -643,7 +685,7 @@ async function analyzeRegion(region) {
   } catch (err) {
     state.results[region.id] = {
       ...blankResult(region),
-      mode: 'ai',
+      mode: 'imagej',
       warnings: [err.message]
     };
     showNotice(`${region.id} 分析失败：${err.message}`, 'warn');
@@ -652,9 +694,13 @@ async function analyzeRegion(region) {
   }
 }
 
-function cropRegion(region) {
-  const w = Math.max(1, Math.round(region.w));
-  const h = Math.max(1, Math.round(region.h));
+function cropRegion(region, padding = 0) {
+  const x0 = Math.max(0, Math.floor(region.x - padding));
+  const y0 = Math.max(0, Math.floor(region.y - padding));
+  const x1 = Math.min(state.image.naturalWidth, Math.ceil(region.x + region.w + padding));
+  const y1 = Math.min(state.image.naturalHeight, Math.ceil(region.y + region.h + padding));
+  const w = Math.max(1, x1 - x0);
+  const h = Math.max(1, y1 - y0);
   const off = document.createElement('canvas');
   off.width = w;
   off.height = h;
@@ -664,14 +710,28 @@ function cropRegion(region) {
   octx.save();
   if (state.roi?.type === 'circle') {
     octx.beginPath();
-    const cx = state.roi.x + state.roi.w / 2 - region.x;
-    const cy = state.roi.y + state.roi.h / 2 - region.y;
+    const cx = state.roi.x + state.roi.w / 2 - x0;
+    const cy = state.roi.y + state.roi.h / 2 - y0;
     octx.arc(cx, cy, state.roi.w / 2, 0, Math.PI * 2);
     octx.clip();
   }
-  octx.drawImage(state.image, region.x, region.y, region.w, region.h, 0, 0, w, h);
+  octx.drawImage(state.image, x0, y0, w, h, 0, 0, w, h);
   octx.restore();
-  return { width: w, height: h, dataUrl: off.toDataURL('image/png') };
+  const validMask = new Uint8Array(w * h);
+  if (state.roi?.type === 'circle') {
+    const cx = state.roi.x + state.roi.w / 2 - x0;
+    const cy = state.roi.y + state.roi.h / 2 - y0;
+    const radius = state.roi.w / 2;
+    const radius2 = radius * radius;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        validMask[y * w + x] = ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= radius2) ? 1 : 0;
+      }
+    }
+  } else {
+    validMask.fill(1);
+  }
+  return { x: x0, y: y0, width: w, height: h, imageData: octx.getImageData(0, 0, w, h), validMask };
 }
 
 function applyManualToSelected() {
@@ -682,7 +742,7 @@ function applyManualToSelected() {
   }
   const count = Math.max(0, Math.round(Number(els.manualCount.value || 0)));
   const mean = Math.max(0, Number(els.manualMeanArea.value || 0));
-  const mode = els.modeSelect.value === 'ai' ? 'manual_corrected' : els.modeSelect.value;
+  const mode = els.modeSelect.value === 'imagej' ? 'manual_corrected' : els.modeSelect.value;
   const total = count * mean;
   const areaUm2 = regionAreaUm2(r);
   const previous = state.results[r.id] || blankResult(r);
@@ -766,9 +826,9 @@ function updateTableAndSummary() {
   els.coverage.textContent = `${formatNum(overallCov)}%`;
 
   els.resultTableBody.innerHTML = tableRows.map(({ r, res, count, totalUm2, meanUm2, cov }) => {
-    const mode = res.mode || 'ai';
+    const mode = res.mode || 'imagej';
     const badgeClass = mode === 'manual_override' ? 'override' : (mode === 'manual_corrected' ? 'manual' : '');
-    const modeLabel = mode === 'manual_override' ? '手动覆盖' : (mode === 'manual_corrected' ? '手动修正' : 'AI识别');
+    const modeLabel = mode === 'manual_override' ? '手动覆盖' : (mode === 'manual_corrected' ? '手动修正' : 'ImageJ风格');
     const warnings = (res.warnings || []).join('；');
     return `<tr class="${r.id === state.selectedRegionId ? 'selected' : ''}" data-id="${r.id}">
       <td>${r.id}</td>
@@ -891,7 +951,7 @@ function exportCsv() {
     const mean = count > 0 ? total / count : Number(res.mean_cell_area_um2 || 0);
     rows.push([
       r.id,
-      res.mode || 'ai',
+      res.mode || 'imagej',
       count,
       total,
       mean,
@@ -906,12 +966,20 @@ function exportCsv() {
 
 function exportJson() {
   if (!state.regions.length && !hasAiResults()) {
-    showNotice('暂无可导出的 AI 分析项目。', 'warn');
+    showNotice('暂无可导出的分区分析项目。', 'warn');
     return;
   }
   const payload = {
     image_name: state.imageName,
     image_type: els.imageType.value,
+    segmentation: {
+      method: 'imagej_local',
+      background_radius_px: Number(els.backgroundRadius.value),
+      threshold_offset: Number(els.thresholdOffset.value),
+      min_cell_area_px2: Number(els.minCellArea.value),
+      max_cell_area_px2: Number(els.maxCellArea.value),
+      watershed: Boolean(els.watershedCells.checked)
+    },
     pixel_size_um: getPixelSizeUm(),
     roi: state.roi,
     regions: state.regions,

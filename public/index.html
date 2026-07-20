@@ -41,6 +41,30 @@
         </select>
       </label>
 
+      <details class="analysisSettings" open>
+        <summary>ImageJ 风格识别参数</summary>
+        <p class="hint">本地执行背景校正、Otsu 自动阈值、形态学清理、颗粒分析和接触细胞分离；图片不会上传到外部模型。</p>
+        <div class="grid2">
+          <label class="field">
+            <span>背景校正半径 px</span>
+            <input id="backgroundRadius" type="number" min="2" max="128" step="1" value="24" />
+          </label>
+          <label class="field">
+            <span>阈值偏移（正值更严格）</span>
+            <input id="thresholdOffset" type="number" min="-100" max="100" step="1" value="0" />
+          </label>
+          <label class="field">
+            <span>最小细胞面积 px²</span>
+            <input id="minCellArea" type="number" min="1" step="1" value="80" />
+          </label>
+          <label class="field">
+            <span>最大细胞面积 px²</span>
+            <input id="maxCellArea" type="number" min="1" step="1" value="50000" />
+          </label>
+        </div>
+        <label class="checkLine"><input id="watershedCells" type="checkbox" checked /> 分水岭方式分离接触细胞</label>
+      </details>
+
       <div class="grid2">
         <label class="field">
           <span>Scale bar 实际长度 μm</span>
@@ -84,7 +108,7 @@
       <p class="hint" id="zoomHint">未加载图片</p>
 
       <h2>分析</h2>
-      <button id="analyzeAllBtn" class="primary">并行分析全部区域</button>
+      <button id="analyzeAllBtn" class="primary">分析全部区域</button>
       <button id="analyzeOneBtn">只分析当前选中区域</button>
       <button id="clearBtn">清空结果</button>
       <progress id="progress" value="0" max="1"></progress>
@@ -98,7 +122,7 @@
       <label class="field">
         <span>模式</span>
         <select id="modeSelect">
-          <option value="ai">AI 识别</option>
+          <option value="imagej">ImageJ 风格识别</option>
           <option value="manual_corrected">手动修正</option>
           <option value="manual_override">手动覆盖</option>
         </select>
@@ -304,6 +328,7 @@
     </section>
   </main>
 
+  <script src="imagej-segmentation.js"></script>
   <script src="app.js"></script>
   <script src="manual-area-extra.js"></script>
 </body>
