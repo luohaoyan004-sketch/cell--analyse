@@ -27,6 +27,8 @@ const els = {
   imageNameHint: $('imageNameHint'),
   aiMagnification: $('aiMagnification'),
   aiMagnificationHint: $('aiMagnificationHint'),
+  aiCellMorphology: $('aiCellMorphology'),
+  aiCellMorphologyHint: $('aiCellMorphologyHint'),
   imageType: $('imageType'),
   backgroundRadius: $('backgroundRadius'),
   thresholdOffset: $('thresholdOffset'),
@@ -74,9 +76,9 @@ const els = {
 };
 
 const AI_MAGNIFICATION_PRESETS = {
-  4: { diameter: 12, label: '4×', description: '预计圆细胞直径约 12 px；适用于当前 Plan Fluor 4× 示例图。' },
-  10: { diameter: 30, label: '10×', description: '预计圆细胞直径约 30 px；使用更大的检测尺度。' },
-  20: { diameter: 60, label: '20×', description: '预计圆细胞直径约 60 px；使用高倍检测尺度。' }
+  4: { diameter: 12, spreadDiameter: 22, label: '4×', description: '圆细胞约 12 px；铺展细胞短轴约 22 px。' },
+  10: { diameter: 30, spreadDiameter: 55, label: '10×', description: '圆细胞约 30 px；铺展细胞短轴约 55 px。' },
+  20: { diameter: 60, spreadDiameter: 110, label: '20×', description: '圆细胞约 60 px；铺展细胞短轴约 110 px。' }
 };
 
 let toastTimer = null;
@@ -139,7 +141,7 @@ function updateAiActionStates() {
     if (!el) return;
     el.disabled = !hasSelectedRegion || state.isAnalyzing;
   });
-  [els.aiMagnification, els.backgroundRadius, els.thresholdOffset, els.minCellArea, els.maxCellArea, els.watershedCells].forEach(el => {
+  [els.aiMagnification, els.aiCellMorphology, els.backgroundRadius, els.thresholdOffset, els.minCellArea, els.maxCellArea, els.watershedCells].forEach(el => {
     if (el) el.disabled = state.isAnalyzing;
   });
 
@@ -158,6 +160,7 @@ function init() {
   bindEvents();
   updateScaleHint();
   updateAiMagnificationHint();
+  updateAiCellMorphologyHint();
   draw();
   updateAiActionStates();
   initTabs();
@@ -168,7 +171,7 @@ async function checkServer() {
   try {
     const res = await fetch('/api/health');
     await res.json();
-    els.serverStatus.textContent = '尺度感知圆细胞识别 · TIFF 浏览器解析';
+    els.serverStatus.textContent = '圆细胞 / 铺展细胞识别 · TIFF 浏览器解析';
     els.serverStatus.className = 'status ok';
   } catch (_) {
     els.serverStatus.textContent = '本地分割与 TIFF 浏览器解析可用';
@@ -181,13 +184,16 @@ function bindEvents() {
   bindDropUpload();
   els.aiMagnification.addEventListener('change', () => {
     updateAiMagnificationHint();
-    if (hasAiResults()) {
-      state.results = {};
-      updateTableAndSummary();
-      draw();
-      updateAiActionStates();
-      showNotice('倍镜已切换，旧分析结果已清除，请重新分析。');
-    }
+    updateAiCellMorphologyHint();
+    invalidateAiResults('倍镜已切换');
+  });
+  els.aiCellMorphology.addEventListener('change', () => {
+    updateAiCellMorphologyHint();
+    invalidateAiResults('识别对象已切换');
+  });
+  els.imageType.addEventListener('change', () => {
+    updateAiCellMorphologyHint();
+    invalidateAiResults('图像类型已切换');
   });
   els.scaleUm.addEventListener('input', () => { updateScaleHint(); recomputeManualDerived(); });
   els.scalePx.addEventListener('input', () => { updateScaleHint(); recomputeManualDerived(); });
@@ -239,6 +245,40 @@ function updateAiMagnificationHint() {
   if (!els.aiMagnificationHint) return;
   const preset = getAiMagnificationPreset();
   els.aiMagnificationHint.textContent = `${preset.label}：${preset.description}`;
+}
+
+function getAiDetectionMode() {
+  if (els.imageType.value === 'fluorescence') return 'particle';
+  const selected = els.aiCellMorphology?.value || 'auto';
+  if (selected === 'circular') return 'circular_blob';
+  if (selected === 'spread') return 'spread_cell';
+  return Number(els.aiMagnification.value) === 4 ? 'circular_blob' : 'spread_cell';
+}
+
+function updateAiCellMorphologyHint() {
+  if (!els.aiCellMorphologyHint) return;
+  if (els.imageType.value === 'fluorescence') {
+    els.aiCellMorphologyHint.textContent = '荧光模式使用亮目标阈值分割；细胞形态选项仅用于明场图像。';
+    return;
+  }
+  const selected = els.aiCellMorphology.value;
+  const resolved = getAiDetectionMode();
+  if (selected === 'auto') {
+    els.aiCellMorphologyHint.textContent = `自动模式当前选择：${resolved === 'circular_blob' ? '小圆细胞 / 圆点' : '铺展贴壁细胞'}；可手动覆盖。`;
+  } else if (selected === 'spread') {
+    els.aiCellMorphologyHint.textContent = '铺展模式：检测暗胞体中心，并利用周围边缘和相邻细胞中心估计轮廓。';
+  } else {
+    els.aiCellMorphologyHint.textContent = '圆点模式：检测亮中心—暗环结构，适合悬浮或未铺展的小圆细胞。';
+  }
+}
+
+function invalidateAiResults(reason) {
+  if (!hasAiResults()) return;
+  state.results = {};
+  updateTableAndSummary();
+  draw();
+  updateAiActionStates();
+  showNotice(`${reason}，旧分析结果已清除，请重新分析。`);
 }
 
 function bindDropUpload() {
@@ -670,20 +710,21 @@ async function analyzeRegion(region) {
     const maxCellArea = Number(els.maxCellArea.value);
     const magnification = Number(els.aiMagnification.value);
     const magnificationPreset = getAiMagnificationPreset();
-    const circularCellMode = els.imageType.value !== 'fluorescence';
+    const detectionMode = getAiDetectionMode();
     const padding = clamp(Math.max(
       backgroundRadius * 2,
       Math.sqrt(Math.max(1, maxCellArea) / Math.PI) * 0.5,
-      magnificationPreset.diameter * 1.5
-    ), 16, 160);
+      detectionMode === 'spread_cell' ? magnificationPreset.spreadDiameter * 1.8 : magnificationPreset.diameter * 1.5
+    ), 16, 256);
     const crop = cropRegion(region, padding);
     if (!window.ImageJSegmentation?.segmentImageData) throw new Error('本地分割模块未加载');
     await new Promise(resolve => requestAnimationFrame(resolve));
     const result = window.ImageJSegmentation.segmentImageData(crop.imageData, {
       imageType: els.imageType.value,
-      detectionMode: circularCellMode ? 'circular_blob' : 'particle',
+      detectionMode,
       magnification,
       expectedDiameter: magnificationPreset.diameter,
+      expectedSpreadDiameter: magnificationPreset.spreadDiameter,
       validMask: crop.validMask,
       backgroundRadius,
       thresholdOffset: Number(els.thresholdOffset.value),
@@ -717,6 +758,7 @@ async function analyzeRegion(region) {
       model: 'imagej-local',
       method: result.method,
       magnification,
+      cell_morphology: detectionMode,
       region_id: region.id,
       cell_count: assignedCells.length,
       total_cell_area_pixels: totalAreaPixels,
@@ -1026,9 +1068,11 @@ function exportJson() {
     image_name: state.imageName,
     image_type: els.imageType.value,
     segmentation: {
-      method: els.imageType.value === 'fluorescence' ? 'imagej_particle' : 'scale_aware_circular_blob',
+      method: getAiDetectionMode(),
       magnification: Number(els.aiMagnification.value),
+      requested_cell_morphology: els.aiCellMorphology.value,
       expected_cell_diameter_px: getAiMagnificationPreset().diameter,
+      expected_spread_cell_short_axis_px: getAiMagnificationPreset().spreadDiameter,
       background_radius_px: Number(els.backgroundRadius.value),
       threshold_offset: Number(els.thresholdOffset.value),
       min_cell_area_px2: Number(els.minCellArea.value),
