@@ -2,8 +2,8 @@
  * ImageJ-inspired, dependency-free cell segmentation for the browser.
  *
  * Pipelines:
- * - scale-aware circular-cell mode: Difference-of-Gaussians-style response
- *   -> local maxima -> radial ring validation -> non-maximum suppression.
+ * - scale-aware circular-cell mode: dual-polarity Difference-of-Gaussians-style
+ *   response -> local maxima -> radial phase-ring validation -> suppression.
  * - particle mode: local background subtraction -> Otsu threshold -> morphology
  *   -> connected particles -> watershed-like splitting.
  * This is deliberately deterministic and runs locally; no image is uploaded.
@@ -134,7 +134,8 @@
   }
 
   /**
-   * Detect round brightfield cells by their bright centre/dark halo signature.
+   * Detect round brightfield cells with either bright-centre/dark-halo or
+   * dark-centre/bright-halo phase-contrast signatures.
    *
    * This follows the scale-space principle used by LoG/DoG blob detectors, but
    * uses integral-image box filters so a multi-megapixel TIFF remains practical
@@ -152,48 +153,57 @@
       const outerRadius = Math.max(innerRadius + 2, Math.round(diameter * 0.75));
       const inner = boxBlur(gray, width, height, innerRadius);
       const outer = boxBlur(gray, width, height, outerRadius);
-      const response = new Float32Array(gray.length);
-      for (let i = 0; i < response.length; i++) {
-        if (validMask[i]) response[i] = inner[i] - outer[i];
-      }
-
-      const stats = robustLocationScale(response, validMask);
-      const threshold = stats.median + stats.sigma * 8.5 + options.thresholdOffset * 0.2;
-      const margin = Math.max(3, Math.ceil(diameter * 0.9));
-      const hessianStep = Math.max(1, Math.round(diameter * 0.24));
-      const minRingContrast = Math.max(1.5, stats.sigma * 1.4);
-      const minRecovery = Math.max(0.75, stats.sigma * 0.65);
-      let localMaximumCount = 0;
-
-      for (let y = margin; y < height - margin; y++) {
-        for (let x = margin; x < width - margin; x++) {
-          const index = y * width + x;
-          const value = response[index];
-          if (!validMask[index] || value <= threshold || !isLocalMaximum(response, validMask, width, index)) continue;
-          localMaximumCount++;
-          const blobness = hessianBlobness(response, width, x, y, hessianStep);
-          if (blobness < 0.18) continue;
-          const radial = radialRingEvidence(gray, validMask, width, height, x, y, diameter, minRingContrast, minRecovery);
-          const roundEnough = radial.coverage >= 0.62 && blobness >= 0.35;
-          const partlyOccludedButIsotropic = radial.coverage >= 0.5 && blobness >= 0.7;
-          if (!roundEnough && !partlyOccludedButIsotropic) continue;
-
-          const radius = diameter / 2;
-          const area = Math.PI * radius * radius;
-          if (area < options.minArea || area > options.maxArea) continue;
-          candidates.push({
-            x: x + 0.5,
-            y: y + 0.5,
-            radius,
-            area,
-            response: value,
-            blobness,
-            radialCoverage: radial.coverage,
-            confidence: value / Math.max(0.5, threshold) + blobness * 1.5 + radial.coverage * 1.5
-          });
+      for (const phasePolarity of ['bright-centre-dark-halo', 'dark-centre-bright-halo']) {
+        const response = new Float32Array(gray.length);
+        for (let i = 0; i < response.length; i++) {
+          if (!validMask[i]) continue;
+          response[i] = phasePolarity === 'bright-centre-dark-halo'
+            ? inner[i] - outer[i]
+            : outer[i] - inner[i];
         }
+
+        const stats = robustLocationScale(response, validMask);
+        const thresholdSigma = phasePolarity === 'bright-centre-dark-halo' ? 8.5 : 7;
+        const threshold = stats.median + stats.sigma * thresholdSigma + options.thresholdOffset * 0.2;
+        const margin = Math.max(3, Math.ceil(diameter * 0.9));
+        const hessianStep = Math.max(1, Math.round(diameter * 0.24));
+        const minRingContrast = Math.max(1.5, stats.sigma * 1.4);
+        const minRecovery = Math.max(0.75, stats.sigma * 0.65);
+        let localMaximumCount = 0;
+
+        for (let y = margin; y < height - margin; y++) {
+          for (let x = margin; x < width - margin; x++) {
+            const index = y * width + x;
+            const value = response[index];
+            if (!validMask[index] || value <= threshold || !isLocalMaximum(response, validMask, width, index)) continue;
+            localMaximumCount++;
+            const blobness = hessianBlobness(response, width, x, y, hessianStep);
+            if (blobness < 0.18) continue;
+            const radial = radialRingEvidence(
+              gray, validMask, width, height, x, y, diameter, minRingContrast, minRecovery, phasePolarity
+            );
+            const roundEnough = radial.coverage >= 0.62 && blobness >= 0.35;
+            const partlyOccludedButIsotropic = radial.coverage >= 0.5 && blobness >= 0.7;
+            if (!roundEnough && !partlyOccludedButIsotropic) continue;
+
+            const radius = diameter / 2;
+            const area = Math.PI * radius * radius;
+            if (area < options.minArea || area > options.maxArea) continue;
+            candidates.push({
+              x: x + 0.5,
+              y: y + 0.5,
+              radius,
+              area,
+              response: value,
+              blobness,
+              phasePolarity,
+              radialCoverage: radial.coverage,
+              confidence: value / Math.max(0.5, threshold) + blobness * 1.5 + radial.coverage * 1.5
+            });
+          }
+        }
+        scaleSummaries.push({ diameter, threshold, localMaximumCount, phasePolarity });
       }
-      scaleSummaries.push({ diameter, threshold, localMaximumCount });
     }
 
     candidates.sort((a, b) => b.confidence - a.confidence || b.response - a.response);
@@ -212,7 +222,7 @@
     const meanThreshold = scaleSummaries.reduce((sum, item) => sum + item.threshold, 0) / scaleSummaries.length;
     const warnings = [
       `尺度感知圆细胞识别：${options.magnification}×，预计直径 ${round(options.expectedDiameter, 1)}px`,
-      `多尺度 DoG/LoG 式检测 + 径向环形校验 + 非极大值抑制；候选 ${candidates.length} 个，保留 ${cells.length} 个`
+      `双极性多尺度 DoG/LoG 检测 + 径向相差环校验 + 非极大值抑制；候选 ${candidates.length} 个，保留 ${cells.length} 个`
     ];
     if (!cells.length) warnings.push('没有找到符合当前倍镜尺度的圆形细胞；请核对倍镜或降低阈值偏移');
     const coverage = validCount > 0 ? totalAreaPixels / validCount * 100 : 0;
@@ -221,7 +231,7 @@
       method: 'scale_aware_circular_blob',
       threshold: meanThreshold,
       autoThreshold: meanThreshold - options.thresholdOffset * 0.2,
-      polarity: 'bright-centre-dark-halo',
+      polarity: 'dual-phase-ring',
       magnification: options.magnification,
       expectedDiameterPixels: options.expectedDiameter,
       validAreaPixels: validCount,
@@ -278,7 +288,7 @@
     return Math.min(Math.abs(first), Math.abs(second)) / Math.max(1e-6, Math.abs(first), Math.abs(second));
   }
 
-  function radialRingEvidence(gray, validMask, width, height, x, y, diameter, minContrast, minRecovery) {
+  function radialRingEvidence(gray, validMask, width, height, x, y, diameter, minContrast, minRecovery, phasePolarity) {
     const angles = 16;
     let validDirections = 0;
     let supportedDirections = 0;
@@ -294,11 +304,20 @@
       const outerB = sampleNearest(gray, validMask, width, height, x + cos * diameter * 0.88, y + sin * diameter * 0.88);
       if ([core, ringA, ringB, ringC, outerA, outerB].some(value => value === null)) continue;
       validDirections++;
-      const ring = Math.min(ringA, ringB, ringC);
       const outer = (outerA + outerB) / 2;
-      if (core - ring >= minContrast
-        && outer - ring >= minRecovery
-        && core - outer >= minRecovery * 0.5) supportedDirections++;
+      if (phasePolarity === 'dark-centre-bright-halo') {
+        const ring = ringA + ringB + ringC
+          - Math.min(ringA, ringB, ringC)
+          - Math.max(ringA, ringB, ringC);
+        if (ring - core >= Math.max(3, minContrast * 1.25)
+          && ring - outer >= Math.max(1.5, minRecovery * 1.5)
+          && outer - core >= minRecovery * 0.5) supportedDirections++;
+      } else {
+        const ring = Math.min(ringA, ringB, ringC);
+        if (core - ring >= minContrast
+          && outer - ring >= minRecovery
+          && core - outer >= minRecovery * 0.5) supportedDirections++;
+      }
     }
     return { coverage: validDirections ? supportedDirections / validDirections : 0 };
   }
@@ -328,7 +347,8 @@
       contour,
       confidence: clamp(candidate.confidence / 5, 0, 1),
       blobness: candidate.blobness,
-      radial_coverage: candidate.radialCoverage
+      radial_coverage: candidate.radialCoverage,
+      phase_polarity: candidate.phasePolarity
     };
   }
 
