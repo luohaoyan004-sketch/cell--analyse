@@ -43,6 +43,27 @@ function syntheticHaloImage(width, height, diameter, centers) {
   return { width, height, data };
 }
 
+function syntheticDarkCentreHaloImage(width, height, diameter, centers) {
+  const data = new Uint8ClampedArray(width * height * 4);
+  const radius = diameter / 2;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let value = 135 + x * 0.02 + y * 0.015;
+      for (const center of centers) {
+        const distance = Math.hypot(x - center.x, y - center.y);
+        if (distance <= radius * 0.38) value = 45;
+        else if (distance <= radius * 0.68) value = 225;
+      }
+      const index = (y * width + x) * 4;
+      data[index] = value;
+      data[index + 1] = value;
+      data[index + 2] = value;
+      data[index + 3] = 255;
+    }
+  }
+  return { width, height, data };
+}
+
 function syntheticSpreadImage(width, height, cells) {
   const data = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) {
@@ -141,6 +162,27 @@ test('magnification changes the expected circular-cell scale', () => {
   assert.equal(result.magnification, 10);
   assert.equal(result.expectedDiameterPixels, 30);
   assert.equal(result.cell_count, 1);
+});
+
+test('circular mode detects dark-centre bright-halo phase cells', () => {
+  const centers = [{ x: 42, y: 38 }, { x: 75, y: 49 }, { x: 88, y: 49 }];
+  const image = syntheticDarkCentreHaloImage(140, 95, 12, centers);
+  for (const [x, y] of [[22, 72], [113, 24], [119, 71]]) {
+    const index = (y * image.width + x) * 4;
+    image.data[index] = 20;
+    image.data[index + 1] = 20;
+    image.data[index + 2] = 20;
+  }
+  const result = segmentImageData(image, {
+    imageType: 'phase_contrast', detectionMode: 'circular_blob', magnification: 4,
+    expectedDiameter: 12, minArea: 50, maxArea: 220
+  });
+  assert.equal(result.polarity, 'dual-phase-ring');
+  assert.equal(result.cell_count, 3);
+  assert.ok(result.cells.every(cell => cell.phase_polarity === 'dark-centre-bright-halo'));
+  for (const center of centers) {
+    assert.ok(result.cells.some(cell => Math.hypot(cell.center_x - center.x, cell.center_y - center.y) < 3));
+  }
 });
 
 test('spread-cell mode finds elongated dark bodies and estimates contours', () => {

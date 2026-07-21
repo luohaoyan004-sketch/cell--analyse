@@ -264,11 +264,11 @@ function updateAiCellMorphologyHint() {
   const selected = els.aiCellMorphology.value;
   const resolved = getAiDetectionMode();
   if (selected === 'auto') {
-    els.aiCellMorphologyHint.textContent = `自动模式当前选择：${resolved === 'circular_blob' ? '小圆细胞 / 圆点' : '铺展贴壁细胞'}；可手动覆盖。`;
+    els.aiCellMorphologyHint.textContent = `自动模式当前选择：${resolved === 'circular_blob' ? '圆细胞 / 双极性相差圆点' : '铺展贴壁细胞'}；可手动覆盖。`;
   } else if (selected === 'spread') {
     els.aiCellMorphologyHint.textContent = '铺展模式：检测暗胞体中心，并利用周围边缘和相邻细胞中心估计轮廓。';
   } else {
-    els.aiCellMorphologyHint.textContent = '圆点模式：检测亮中心—暗环结构，适合悬浮或未铺展的小圆细胞。';
+    els.aiCellMorphologyHint.textContent = '圆点模式：同时检测亮中心—暗环和暗中心—亮环，适合相差图中的悬浮或未铺展圆细胞。';
   }
 }
 
